@@ -386,7 +386,7 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
     const parsed = tryParseJsonOutput(result);
     if (parsed?.body) {
       return c.json({
-        title: parsed.title || `Bug: ${description.slice(0, 70)}`,
+        title: parsed.title || `bug: ${description.slice(0, 70)}`,
         body: parsed.body,
         systemInfo,
       });
@@ -395,7 +395,7 @@ bugReportRoutes.post('/generate', authMiddleware, async (c) => {
     // Claude didn't return valid JSON, use raw output as body
     logger.info('bug-report: claude output was not valid JSON, using as raw body');
     return c.json({
-      title: `Bug: ${description.slice(0, 70)}`,
+      title: `bug: ${description.slice(0, 70)}`,
       body: result,
       systemInfo,
     });
