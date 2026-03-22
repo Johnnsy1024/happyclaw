@@ -4939,6 +4939,46 @@ function recoverConversationAgents(): void {
   }
 }
 
+async function cleanupOrphanedHostProcesses(): Promise<void> {
+  const projectRoot = process.cwd();
+  try {
+    const { stdout: psOut } = await execFileAsync('pgrep', [
+      '-f',
+      `node.*${projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/container/agent-runner/dist/index\\.js`,
+    ], { timeout: 5000 });
+    const pids = (typeof psOut === 'string' ? psOut : String(psOut))
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(Number)
+      .filter((pid) => pid !== process.pid && !isNaN(pid));
+    for (const pid of pids) {
+      try {
+        // Kill the entire process group (negative PID) to clean up child processes
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        try {
+          // Fallback to killing just the process if it's not a group leader
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already dead */
+        }
+      }
+    }
+    if (pids.length > 0) {
+      logger.info(
+        { count: pids.length, pids },
+        'Killed orphaned host agent-runner processes',
+      );
+    }
+  } catch (err: any) {
+    // pgrep exits 1 when no matches — that's fine
+    if (err?.code !== 1) {
+      logger.warn({ err }, 'Failed to clean up orphaned host processes');
+    }
+  }
+}
+
 async function ensureDockerRunning(): Promise<void> {
   // Skip all Docker checks when no groups use container mode
   if (!hasContainerModeGroups()) {
@@ -4979,38 +5019,6 @@ async function ensureDockerRunning(): Promise<void> {
       '╚════════════════════════════════════════════════════════════════╝\n',
     );
     throw new Error('Docker is required but not running');
-  }
-
-  // Kill orphaned host agent-runner processes from previous runs
-  try {
-    const { stdout: psOut } = await execFileAsync('pgrep', [
-      '-f',
-      'node.*container/agent-runner/dist/index\\.js',
-    ], { timeout: 5000 });
-    const pids = (typeof psOut === 'string' ? psOut : String(psOut))
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map(Number)
-      .filter((pid) => pid !== process.pid && !isNaN(pid));
-    for (const pid of pids) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        /* already dead */
-      }
-    }
-    if (pids.length > 0) {
-      logger.info(
-        { count: pids.length, pids },
-        'Killed orphaned host agent-runner processes',
-      );
-    }
-  } catch (err: any) {
-    // pgrep exits 1 when no matches — that's fine
-    if (err?.code !== 1) {
-      logger.warn({ err }, 'Failed to clean up orphaned host processes');
-    }
   }
 
   // Kill and clean up orphaned happyclaw containers from previous runs
@@ -6173,6 +6181,7 @@ async function main(): Promise<void> {
     }
   }, 60 * 1000);
 
+  await cleanupOrphanedHostProcesses();
   await ensureDockerRunning();
 
   queue.setProcessMessagesFn(processGroupMessages);
