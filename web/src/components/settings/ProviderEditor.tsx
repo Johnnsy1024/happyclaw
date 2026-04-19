@@ -55,6 +55,13 @@ function buildCustomEnv(rows: EnvRow[]): { customEnv: Record<string, string>; er
   return { customEnv, error: null };
 }
 
+function getCodexModelHint(authMode: 'oauth' | 'api_key' | 'third_party', savedAuthMode?: string | null) {
+  if (authMode === 'oauth' || savedAuthMode === 'chatgpt') {
+    return '当前 OAuth 登录态如果来自 ChatGPT 账号，部分模型可能不支持手动指定。想稳定切换到 gpt-5.4-mini，请改用 API Key 或第三方兼容渠道；继续用 OAuth 时建议留空。';
+  }
+  return '推荐使用精确模型名，例如 gpt-5.4 或 gpt-5.4-mini。';
+}
+
 interface ProviderEditorProps {
   open: boolean;
   provider: ProviderWithHealth | null;
@@ -740,9 +747,17 @@ export function ProviderEditor({
               value={model}
               onChange={(e) => setModel(e.target.value)}
               disabled={saving}
-              placeholder={providerRuntime === 'codex' ? '例如 gpt-5.4' : '留空使用默认模型'}
+              placeholder={providerRuntime === 'codex' ? '例如 gpt-5.4 或 gpt-5.4-mini' : '留空使用默认模型'}
               className="font-mono"
             />
+            {providerRuntime === 'codex' && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {getCodexModelHint(
+                  providerType === 'third_party' ? 'third_party' : codexAuthTab,
+                  provider?.codexAuthMode ?? null,
+                )}
+              </p>
+            )}
           </div>
 
           <div className="border-t border-border pt-4">

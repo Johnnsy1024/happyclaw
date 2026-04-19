@@ -48,7 +48,7 @@ build-web: ## 仅编译前端
 
 # ─── Production ──────────────────────────────────────────────
 
-start: ensure-latest-sdk ## 一键启动生产环境
+start: ## 一键启动生产环境
 	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
 ifeq ($(HAS_BUN),1)
@@ -128,7 +128,7 @@ typecheck-agent-runner:
 	cd container/agent-runner && $(RUN) tsc --noEmit
 
 test: ## 运行单元测试
-	bun test
+	$(PKG) run test
 
 format: ## 格式化代码
 	$(PKG) run format
@@ -212,17 +212,19 @@ backup: ## 备份运行时数据到 happyclaw-backup-{date}.tar.gz
 	@DATE=$$(date +%Y%m%d-%H%M%S); \
 	FILE="happyclaw-backup-$$DATE.tar.gz"; \
 	echo "📦 正在打包备份到 $$FILE ..."; \
+	echo "⚠️  建议先停止服务后再备份，以获得一致的数据库快照"; \
 	tar -czf "$$FILE" \
 	  --exclude='data/ipc' \
 	  --exclude='data/env' \
 	  --exclude='data/happyclaw.log' \
-	  --exclude='data/db/messages.db-shm' \
-	  --exclude='data/db/messages.db-wal' \
 	  --exclude='data/groups/*/logs' \
 	  data/db \
 	  data/config \
 	  data/groups \
 	  data/sessions \
+	  $$([ -d data/memory ] && echo data/memory) \
+	  $$([ -d data/mcp-servers ] && echo data/mcp-servers) \
+	  $$([ -d data/avatars ] && echo data/avatars) \
 	  $$([ -d data/skills ] && echo data/skills) \
 	  2>/dev/null; \
 	echo "✅ 备份完成：$$FILE ($$(du -sh $$FILE | cut -f1))"

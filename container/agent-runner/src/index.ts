@@ -1590,6 +1590,7 @@ async function mainCodex(containerInput: ContainerInput): Promise<void> {
     }
   }
 
+  let exitCode = 0;
   try {
     while (true) {
       try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
@@ -1642,8 +1643,21 @@ async function mainCodex(containerInput: ContainerInput): Promise<void> {
       prompt = nextMessage.text;
       promptImages = nextMessage.images;
     }
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log(`Codex query error: ${errorMessage}`);
+    if (err instanceof Error && err.stack) {
+      log(`Codex query error stack:\n${err.stack}`);
+    }
+    writeOutput({
+      status: 'error',
+      result: null,
+      error: errorMessage,
+      newSessionId: sessionId,
+    });
+    exitCode = 1;
   } finally {
-    forceExitWithSafetyNet(0);
+    forceExitWithSafetyNet(exitCode);
   }
 }
 

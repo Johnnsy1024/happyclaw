@@ -50,6 +50,13 @@ function buildCustomEnv(rows: EnvRow[]): { customEnv: Record<string, string>; er
   return { customEnv, error: null };
 }
 
+function getCodexModelHint(authMode: 'oauth' | 'api-key' | 'third-party') {
+  if (authMode === 'oauth') {
+    return '当前 OAuth 登录态通常来自 ChatGPT 账号授权，部分模型可能不支持手动指定。想稳定切换到 gpt-5.4-mini，请改用 API Key 或第三方兼容渠道；继续用 OAuth 时建议留空。';
+  }
+  return '推荐使用精确模型名，例如 gpt-5.4 或 gpt-5.4-mini。';
+}
+
 export function SetupProvidersPage() {
   const navigate = useNavigate();
   const { user, setupStatus, checkAuth, initialized } = useAuthStore();
@@ -592,9 +599,10 @@ export function SetupProvidersPage() {
                       type="text"
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      placeholder="gpt-5.4"
+                      placeholder="gpt-5.4 / gpt-5.4-mini"
                       className="font-mono"
                     />
+                    <p className="text-xs text-muted-foreground mt-1">{getCodexModelHint('oauth')}</p>
                   </div>
                 </div>
               )}
@@ -654,9 +662,10 @@ export function SetupProvidersPage() {
                         type="text"
                         value={model}
                         onChange={(e) => setModel(e.target.value)}
-                        placeholder="gpt-5.4"
+                        placeholder="gpt-5.4 / gpt-5.4-mini"
                         className="font-mono"
                       />
+                      <p className="text-xs text-muted-foreground mt-1">{getCodexModelHint('api-key')}</p>
                     </div>
                   )}
                 </>
@@ -692,9 +701,12 @@ export function SetupProvidersPage() {
                     type="text"
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
-                    placeholder={providerRuntime === 'codex' ? 'gpt-5.4' : 'opus[1m] / opus / sonnet[1m] / sonnet / haiku'}
+                    placeholder={providerRuntime === 'codex' ? 'gpt-5.4 / gpt-5.4-mini' : 'opus[1m] / opus / sonnet[1m] / sonnet / haiku'}
                     className="font-mono"
                   />
+                  {providerRuntime === 'codex' && (
+                    <p className="text-xs text-muted-foreground mt-1">{getCodexModelHint('third-party')}</p>
+                  )}
                 </div>
 
                 <div>

@@ -35,6 +35,10 @@ async function runCodexSdkQuery(
   if (!config || (!config.openaiApiKey && !config.codexAuthJson)) return null;
 
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-sdk-codex-'));
+  const lastMessageDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'happyclaw-sdk-codex-last-'),
+  );
+  const lastMessagePath = path.join(lastMessageDir, 'last-message.txt');
   try {
     const configLines: string[] = [];
     if (opts?.model || config.codexModel) {
@@ -59,6 +63,8 @@ async function runCodexSdkQuery(
       '--json',
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
+      '--output-last-message',
+      lastMessagePath,
       '--ephemeral',
       prompt,
     ];
@@ -110,12 +116,29 @@ async function runCodexSdkQuery(
 
       proc.on('close', () => {
         clearTimeout(timer);
+        if (!latestMessage?.trim()) {
+          try {
+            latestMessage = fs.readFileSync(lastMessagePath, 'utf8').trim() || null;
+          } catch {
+            /* ignore */
+          }
+        }
+        try {
+          fs.rmSync(lastMessageDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
         resolve(latestMessage?.trim() || null);
       });
 
       proc.on('error', (err) => {
         clearTimeout(timer);
         logger.warn({ err: err.message.slice(0, 200) }, 'codex sdkQuery failed');
+        try {
+          fs.rmSync(lastMessageDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
         resolve(null);
       });
     });

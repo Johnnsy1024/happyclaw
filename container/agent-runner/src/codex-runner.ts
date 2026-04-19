@@ -33,6 +33,15 @@ interface CodexQueryResult {
   sessionResumeFailed?: boolean;
 }
 
+interface HappyClawMcpServerConfig {
+  command?: string;
+  args?: unknown;
+  env?: unknown;
+  type?: string;
+  url?: unknown;
+  headers?: unknown;
+}
+
 function isCodexResumeFailure(stderrText: string): boolean {
   const text = stderrText.toLowerCase();
   return (
@@ -43,11 +52,115 @@ function isCodexResumeFailure(stderrText: string): boolean {
   );
 }
 
+function readMcpServersFromSettings(
+  settingsPath: string,
+): Record<string, HappyClawMcpServerConfig> {
+  try {
+    if (!fs.existsSync(settingsPath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      mcpServers?: Record<string, HappyClawMcpServerConfig>;
+    };
+    if (!parsed.mcpServers || typeof parsed.mcpServers !== 'object') return {};
+    return parsed.mcpServers;
+  } catch {
+    return {};
+  }
+}
+
+function isPlainStringRecord(
+  value: unknown,
+): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+function formatTomlStringArray(values: string[]): string {
+  return `[${values.map((value) => JSON.stringify(value)).join(', ')}]`;
+}
+
+function formatTomlInlineStringRecord(record: Record<string, string>): string {
+  const entries = Object.entries(record)
+    .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`);
+  return `{ ${entries.join(', ')} }`;
+}
+
+function appendMcpServerConfig(
+  lines: string[],
+  serverName: string,
+  server: HappyClawMcpServerConfig,
+): void {
+  if (!serverName) return;
+
+  const isHttpServer = typeof server.url === 'string' && server.url.trim();
+  const isStdioServer = typeof server.command === 'string' && server.command.trim();
+  if (!isHttpServer && !isStdioServer) return;
+
+  lines.push('', `[mcp_servers.${JSON.stringify(serverName)}]`);
+
+  if (isHttpServer) {
+    lines.push(`url = ${JSON.stringify(String(server.url).trim())}`);
+    if (isPlainStringRecord(server.headers) && Object.keys(server.headers).length > 0) {
+      lines.push(
+        `http_headers = ${formatTomlInlineStringRecord(server.headers)}`,
+      );
+    }
+    return;
+  }
+
+  lines.push(`command = ${JSON.stringify(String(server.command).trim())}`);
+  if (Array.isArray(server.args)) {
+    const args = server.args.filter((arg): arg is string => typeof arg === 'string');
+    if (args.length > 0) {
+      lines.push(`args = ${formatTomlStringArray(args)}`);
+    }
+  }
+  if (isPlainStringRecord(server.env) && Object.keys(server.env).length > 0) {
+    lines.push(`env = ${formatTomlInlineStringRecord(server.env)}`);
+  }
+}
+
+function syncCodexSkills(
+  codexHome: string,
+  skillSourceDirs: string[],
+): void {
+  const codexSkillsDir = path.join(codexHome, 'skills');
+  fs.mkdirSync(codexSkillsDir, { recursive: true });
+
+  for (const sourceDir of skillSourceDirs) {
+    if (!sourceDir || !fs.existsSync(sourceDir)) continue;
+    for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const sourcePath = path.join(sourceDir, entry.name);
+      const targetPath = path.join(codexSkillsDir, entry.name);
+      try {
+        if (fs.existsSync(targetPath) && !fs.lstatSync(targetPath).isSymbolicLink()) {
+          fs.rmSync(targetPath, { recursive: true, force: true });
+        } else if (fs.existsSync(targetPath)) {
+          fs.unlinkSync(targetPath);
+        }
+      } catch {
+        /* ignore */
+      }
+      try {
+        fs.symlinkSync(sourcePath, targetPath);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
 function writeCodexConfig(
   codexHome: string,
-  options: { model?: string; openaiBaseUrl?: string },
+  options: {
+    model?: string;
+    openaiBaseUrl?: string;
+    claudeConfigDir?: string;
+    workspaceGroup?: string;
+  },
 ): void {
   fs.mkdirSync(codexHome, { recursive: true });
+  const configPath = path.join(codexHome, 'config.toml');
   const lines: string[] = [];
   if (options.model) {
     lines.push(`model = ${JSON.stringify(options.model)}`);
@@ -55,12 +168,29 @@ function writeCodexConfig(
   if (options.openaiBaseUrl) {
     lines.push(`openai_base_url = ${JSON.stringify(options.openaiBaseUrl)}`);
   }
+  const userMcpServers = options.claudeConfigDir
+    ? readMcpServersFromSettings(path.join(options.claudeConfigDir, 'settings.json'))
+    : {};
+  const workspaceMcpServers = options.workspaceGroup
+    ? readMcpServersFromSettings(
+        path.join(options.workspaceGroup, '.claude', 'settings.json'),
+      )
+    : {};
+  const mergedMcpServers = {
+    ...userMcpServers,
+    ...workspaceMcpServers,
+  };
+  for (const [serverName, server] of Object.entries(mergedMcpServers)) {
+    appendMcpServerConfig(lines, serverName, server);
+  }
   if (lines.length > 0) {
-    fs.writeFileSync(
-      path.join(codexHome, 'config.toml'),
-      lines.join('\n') + '\n',
-      'utf8',
-    );
+    fs.writeFileSync(configPath, lines.join('\n') + '\n', 'utf8');
+    return;
+  }
+  try {
+    fs.unlinkSync(configPath);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -140,11 +270,19 @@ export async function runCodexQuery(
     path.dirname(options.claudeConfigDir || path.join(os.homedir(), '.claude')),
     '.codex',
   );
+  const lastMessageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-codex-last-'));
+  const lastMessagePath = path.join(lastMessageDir, 'last-message.txt');
   writeCodexConfig(codexHome, {
     model: options.codexModel,
     openaiBaseUrl: options.openaiBaseUrl,
+    claudeConfigDir: options.claudeConfigDir,
+    workspaceGroup: options.workspaceGroup,
   });
   writeCodexAuth(codexHome, options.codexAuthJson);
+  syncCodexSkills(codexHome, [
+    path.join(options.claudeConfigDir || path.join(os.homedir(), '.claude'), 'skills'),
+    path.join(options.workspaceGroup, '.claude', 'skills'),
+  ]);
 
   const imageFiles = materializeImages(options.images);
   const isResume = !!options.sessionId?.trim();
@@ -153,6 +291,7 @@ export async function runCodexQuery(
   args.push('--json');
   args.push('--skip-git-repo-check');
   args.push('--dangerously-bypass-approvals-and-sandbox');
+  args.push('--output-last-message', lastMessagePath);
   // `codex exec` supports extra writable dirs, but `codex exec resume` does not.
   // Passing them to resume causes Codex to reject the command and exit before any output.
   if (!isResume) {
@@ -353,6 +492,11 @@ export async function runCodexQuery(
       imageFiles.cleanup();
 
       if (interruptedDuringQuery || closedDuringQuery) {
+        try {
+          fs.rmSync(lastMessageDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
         resolve({
           newSessionId: currentSessionId,
           closedDuringQuery,
@@ -362,11 +506,31 @@ export async function runCodexQuery(
       }
 
       if (code !== 0) {
-        reject(new Error(`Codex exited with code ${code}`));
+        const stderrSummary = stderrText.trim();
+        const detail = stderrSummary
+          ? `Codex exited with code ${code}. stderr: ${stderrSummary}`
+          : `Codex exited with code ${code}`;
+        reject(new Error(detail));
         return;
       }
 
       if (!latestAgentMessage?.trim()) {
+        try {
+          const fallbackMessage = fs.readFileSync(lastMessagePath, 'utf8').trim();
+          if (fallbackMessage) {
+            latestAgentMessage = fallbackMessage;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+
+      if (!latestAgentMessage?.trim()) {
+        try {
+          fs.rmSync(lastMessageDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
         if (isResume && isCodexResumeFailure(stderrText)) {
           resolve({
             newSessionId: undefined,
@@ -382,6 +546,12 @@ export async function runCodexQuery(
           : 'Codex completed without an assistant message.';
         reject(new Error(detail));
         return;
+      }
+
+      try {
+        fs.rmSync(lastMessageDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
       }
 
       options.writeOutput({
