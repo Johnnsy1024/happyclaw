@@ -97,6 +97,11 @@ export function McpServersPage() {
               </div>
             }
           />
+          {isAdmin && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              “同步宿主机”会从 <code>~/.claude/settings.json</code>、<code>~/.claude.json</code> 和 <code>~/.codex/config.toml</code> 导入 MCP 配置。
+            </p>
+          )}
         </div>
 
         {/* Sync message toast */}

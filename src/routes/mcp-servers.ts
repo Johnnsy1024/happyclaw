@@ -37,6 +37,15 @@ interface HostSyncManifest {
   lastSyncAt: string;
 }
 
+interface HostMcpServerConfig {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  type?: 'http' | 'sse';
+  url?: string;
+  headers?: Record<string, string>;
+}
+
 // --- Utility Functions ---
 
 function getUserMcpServersDir(userId: string): string {
@@ -92,6 +101,205 @@ async function writeHostSyncManifest(
     getHostSyncManifestPath(userId),
     JSON.stringify(manifest, null, 2),
   );
+}
+
+function stripTomlComment(line: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const escaped = i > 0 && line[i - 1] === '\\';
+    if (char === "'" && !inDouble && !escaped) inSingle = !inSingle;
+    if (char === '"' && !inSingle && !escaped) inDouble = !inDouble;
+    if (char === '#' && !inSingle && !inDouble) {
+      return line.slice(0, i).trim();
+    }
+  }
+  return line.trim();
+}
+
+function parseTomlString(value: string): string | null {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    try {
+      return JSON.parse(trimmed.replace(/^'/, '"').replace(/'$/, '"'));
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return null;
+}
+
+function splitTomlTopLevel(input: string, separator: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i];
+    const escaped = i > 0 && input[i - 1] === '\\';
+    if (char === "'" && !inDouble && !escaped) inSingle = !inSingle;
+    if (char === '"' && !inSingle && !escaped) inDouble = !inDouble;
+    if (!inSingle && !inDouble) {
+      if (char === '[' || char === '{') depth++;
+      if (char === ']' || char === '}') depth--;
+      if (char === separator && depth === 0) {
+        parts.push(current.trim());
+        current = '';
+        continue;
+      }
+    }
+    current += char;
+  }
+
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function parseTomlStringArray(value: string): string[] | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) return null;
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return [];
+  const parts = splitTomlTopLevel(inner, ',');
+  const result: string[] = [];
+  for (const part of parts) {
+    const parsed = parseTomlString(part);
+    if (parsed === null) return null;
+    result.push(parsed);
+  }
+  return result;
+}
+
+function parseTomlStringRecord(value: string): Record<string, string> | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return {};
+  const result: Record<string, string> = {};
+  for (const entry of splitTomlTopLevel(inner, ',')) {
+    const eqIndex = entry.indexOf('=');
+    if (eqIndex < 0) return null;
+    const rawKey = entry.slice(0, eqIndex).trim();
+    const rawValue = entry.slice(eqIndex + 1).trim();
+    const key = parseTomlString(rawKey);
+    const parsedValue = parseTomlString(rawValue);
+    if (!key || parsedValue === null) return null;
+    result[key] = parsedValue;
+  }
+  return result;
+}
+
+function parseCodexMcpServersToml(
+  content: string,
+): Record<string, HostMcpServerConfig> {
+  const servers: Record<string, HostMcpServerConfig> = {};
+  let currentServerId: string | null = null;
+
+  for (const rawLine of content.split('\n')) {
+    const line = stripTomlComment(rawLine);
+    if (!line) continue;
+
+    const sectionMatch = line.match(/^\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]$/);
+    if (sectionMatch) {
+      currentServerId = sectionMatch[1] || sectionMatch[2] || null;
+      if (currentServerId && !servers[currentServerId]) {
+        servers[currentServerId] = {};
+      }
+      continue;
+    }
+
+    if (line.startsWith('[')) {
+      currentServerId = null;
+      continue;
+    }
+    if (!currentServerId) continue;
+
+    const eqIndex = line.indexOf('=');
+    if (eqIndex < 0) continue;
+    const key = line.slice(0, eqIndex).trim();
+    const rawValue = line.slice(eqIndex + 1).trim();
+    const current = servers[currentServerId];
+
+    switch (key) {
+      case 'command': {
+        const parsed = parseTomlString(rawValue);
+        if (parsed) current.command = parsed;
+        break;
+      }
+      case 'url': {
+        const parsed = parseTomlString(rawValue);
+        if (parsed) {
+          current.url = parsed;
+          current.type = 'http';
+        }
+        break;
+      }
+      case 'args': {
+        const parsed = parseTomlStringArray(rawValue);
+        if (parsed) current.args = parsed;
+        break;
+      }
+      case 'env': {
+        const parsed = parseTomlStringRecord(rawValue);
+        if (parsed) current.env = parsed;
+        break;
+      }
+      case 'http_headers': {
+        const parsed = parseTomlStringRecord(rawValue);
+        if (parsed) current.headers = parsed;
+        break;
+      }
+      case 'env_http_headers': {
+        const parsed = parseTomlStringRecord(rawValue);
+        if (parsed) {
+          current.headers = Object.fromEntries(
+            Object.entries(parsed)
+              .map(([headerName, envVar]) => [headerName, process.env[envVar] || ''])
+              .filter(([, headerValue]) => !!headerValue),
+          );
+        }
+        break;
+      }
+      case 'bearer_token_env_var': {
+        const parsed = parseTomlString(rawValue);
+        const token = parsed ? process.env[parsed] : '';
+        if (token) {
+          current.headers = {
+            ...(current.headers || {}),
+            Authorization: `Bearer ${token}`,
+          };
+        }
+        break;
+      }
+      case 'type': {
+        const parsed = parseTomlString(rawValue);
+        if (parsed === 'http' || parsed === 'sse') current.type = parsed;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(servers).filter(([, server]) => !!server.command || !!server.url),
+  );
+}
+
+async function readCodexHostMcpServers(): Promise<Record<string, HostMcpServerConfig>> {
+  const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+  try {
+    const raw = await fs.readFile(configPath, 'utf-8');
+    return parseCodexMcpServersToml(raw);
+  } catch {
+    return {};
+  }
 }
 
 // --- Routes ---
@@ -303,7 +511,7 @@ mcpServersRoutes.delete('/:id', authMiddleware, async (c) => {
 });
 
 // POST /sync-host — sync from host MCP configs (admin only)
-// Reads from both ~/.claude/settings.json and ~/.claude.json
+// Reads from ~/.claude/settings.json, ~/.claude.json, and ~/.codex/config.toml
 mcpServersRoutes.post('/sync-host', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   if (authUser.role !== 'admin') {
@@ -339,13 +547,21 @@ mcpServersRoutes.post('/sync-host', authMiddleware, async (c) => {
     // File may not exist, that's OK
   }
 
+  // Source 3: ~/.codex/config.toml (Codex CLI MCP settings)
+  // When both Claude and Codex configs define the same server ID, Codex wins
+  // because it is the newer host-level source for Codex runtime integrations.
+  const codexServers = await readCodexHostMcpServers();
+  if (Object.keys(codexServers).length > 0) {
+    hostServers = { ...hostServers, ...codexServers };
+  }
+
   if (Object.keys(hostServers).length === 0) {
     return c.json({
       added: 0,
       updated: 0,
       deleted: 0,
       skipped: 0,
-      message: 'No MCP servers found in host config files',
+      message: 'No MCP servers found in host Claude/Codex config files',
     });
   }
 
